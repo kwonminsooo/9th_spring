@@ -1,203 +1,156 @@
 공통
 
 ```java
-dependencies {
-    implementation 'org.springframework.boot:spring-boot-starter-web'
-    implementation 'org.springframework.boot:spring-boot-starter-security'
-    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
-    runtimeOnly 'com.h2database:h2'
-  
-    implementation 'io.jsonwebtoken:jjwt-api:0.11.5'
-    runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.11.5'
-    runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.11.5'
-
-    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.3.0'
+@Target(ElementType.PARAMETER)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface PageParam {
 }
 
 ```
 
 ```java
-@Entity
-public class Member {
-
-    @Id @GeneratedValue
-    private Long id;
-
-    @Column(unique = true, nullable = false)
-    private String username;
-
-    @Column(nullable = false)
-    private String password;
-
-    private String role;
-
-}
-```
-
-```java
-public interface MemberRepository extends JpaRepository<Member, Long> {
-    Optional<Member> findByUsername(String username);
-}
-```
-
-```java
-@Service
-@RequiredArgsConstructor
-public class MemberService {
-
-    private final MemberRepository memberRepository;
-    private final PasswordEncoder passwordEncoder;
-
-    public Member signup(String username, String rawPassword) {
-        if (memberRepository.findByUsername(username).isPresent()) {
-            throw new IllegalArgumentException("이미 존재하는 아이디");
-        }
-        Member m = new Member();
-        m.setUsername(username);
-        m.setPassword(passwordEncoder.encode(rawPassword));
-        m.setRole("ROLE_USER");
-        return memberRepository.save(m);
-    }
-
-    public Member findByUsername(String username) {
-        return memberRepository.findByUsername(username)
-                .orElseThrow(() -> new UsernameNotFoundException("유저 없음"));
+public class InvalidPageException extends RuntimeException {
+    public InvalidPageException(String message) {
+        super(message);
     }
 }
 
 ```
 
 ```java
-@Service
-@RequiredArgsConstructor
-public class CustomUserDetailsService implements UserDetailsService {
+@Component
+public class PageParamArgumentResolver implements HandlerMethodArgumentResolver {
 
-    private final MemberService memberService;
+    private static final int DEFAULT_SIZE = 10;
 
     @Override
-    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
-        Member m = memberService.findByUsername(username);
-        return User.builder()
-                .username(m.getUsername())
-                .password(m.getPassword())
-                .roles(m.getRole().replace("ROLE_", ""))
+    public boolean supportsParameter(MethodParameter parameter) {
+        return parameter.hasParameterAnnotation(PageParam.class)
+                && Pageable.class.isAssignableFrom(parameter.getParameterType());
+    }
+
+    @Override
+    public Object resolveArgument(MethodParameter parameter,
+                                  ModelAndViewContainer mavContainer,
+                                  NativeWebRequest webRequest,
+                                  WebDataBinderFactory binderFactory) {
+
+        String pageStr = webRequest.getParameter("page");
+        int page = (pageStr == null) ? 1 : Integer.parseInt(pageStr);
+
+        if (page <= 0) {
+            throw new InvalidPageException("page 파라미터는 1 이상이어야 합니다. 입력값=" + page);
+        }
+
+        return PageRequest.of(page - 1, DEFAULT_SIZE);
+    }
+}
+```
+
+```java
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+
+    private final PageParamArgumentResolver pageParamArgumentResolver;
+
+    public WebConfig(PageParamArgumentResolver resolver) {
+        this.pageParamArgumentResolver = resolver;
+    }
+
+    @Override
+    public void addArgumentResolvers(List<HandlerMethodArgumentResolver> resolvers) {
+        resolvers.add(pageParamArgumentResolver);
+    }
+}
+
+```
+
+```java
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(InvalidPageException.class)
+    public ResponseEntity<ApiErrorResponse> handleInvalidPage(InvalidPageException e) {
+        ApiErrorResponse body = ApiErrorResponse.builder()
+                .code("INVALID_PAGE")
+                .message(e.getMessage())
+                .build();
+        return ResponseEntity.badRequest().body(body);
+    }
+
+}
+```
+
+```java
+@Getter
+@Builder
+public class ApiErrorResponse {
+    private String code;
+    private String message;
+}
+
+```
+
+공통 DTO
+
+```java
+@Getter
+@Builder
+public class MyReviewResponse {
+
+    private Long reviewId;
+    private Long storeId;
+    private String storeName;
+    private String content;
+    private Double rating;
+    private LocalDate createdDate;
+}
+
+```
+
+```java
+public enum MissionStatus {
+    IN_PROGRESS,
+    COMPLETED
+}
+
+```
+
+```java
+@Getter
+@Builder
+public class MissionResponse {
+
+    private Long missionId;
+    private Long storeId;
+    private String storeName;
+    private String title;
+    private String description;
+    private int rewardPoint;
+    private MissionStatus status;
+}
+
+```
+
+```java
+@Component
+public class ReviewConverter {
+
+    public MyReviewResponse toMyReviewResponse(Review review) {
+        return MyReviewResponse.builder()
+                .reviewId(review.getId())
+                .storeId(review.getStore().getId())
+                .storeName(review.getStore().getName())
+                .content(review.getContent())
+                .rating((double) review.getRating())
+                .createdDate(review.getCreatedAt().toLocalDate())
                 .build();
     }
-}
 
-```
-
-1. 세션 기반
-
-```java
-@Configuration
-@EnableWebSecurity
-@RequiredArgsConstructor
-public class SecurityConfig {
-
-    private final CustomUserDetailsService customUserDetailsService;
-
-    @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-        http
-                .csrf(csrf -> csrf.disable()) 
-                        .requestMatchers("/signup", "/login", "/h2-console/**").permitAll()
-                        .anyRequest().authenticated()
-                )
-                .userDetailsService(customUserDetailsService)
-                .formLogin(form -> form
-                        .loginPage("/login") 
-                        .loginProcessingUrl("/login")
-                        .defaultSuccessUrl("/home", true)
-                        .permitAll()
-                )
-                .logout(logout -> logout
-                        .logoutUrl("/logout")
-                        .logoutSuccessUrl("/login?logout")
-                )
-                .sessionManagement(session -> session
-                        .sessionCreationPolicy(SessionCreationPolicy.ALWAYS)
-                );
-
-        http.headers(headers -> headers.frameOptions(frame -> frame.disable())); 
-
-        return http.build();
-    }
-
-    @Bean
-    public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder();
-    }
-}
-
-```
-
-```java
-@Controller
-@RequiredArgsConstructor
-public class AuthController {
-
-    private final MemberService memberService;
-
-    @GetMapping("/signup")
-    public String signupForm() {
-        return "signup"; 
-    }
-
-    @PostMapping("/signup")
-    public String signup(@RequestParam String username,
-                         @RequestParam String password) {
-        memberService.signup(username, password);
-        return "redirect:/login";
-    }
-
-    @GetMapping("/login")
-    public String loginForm() {
-        return "login"; 
-    }
-
-    @GetMapping("/home")
-    @ResponseBody
-    public String home(Authentication auth) {
-        return "안녕, " + auth.getName() + " (세션 로그인 성공)";
-    }
-}
-
-```
-
-2JWT기반 로그인
-
-```java
-@Configuration
-@EnableWebSecurity
-@RequiredArgsConstructor
-public class SecurityConfig {
-
-    private final CustomUserDetailsService customUserDetailsService;
-    private final JwtFilter jwtFilter;
-
-    @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-        http
-                .csrf(csrf -> csrf.disable())
-                .sessionManagement(sm -> sm
-                        .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
-                )
-                .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/api/auth/signup", "/api/auth/login",
-                                         "/v3/api-docs/**", "/swagger-ui/**").permitAll()
-                        .anyRequest().authenticated()
-                )
-                .userDetailsService(customUserDetailsService);
-
-        http.addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
-
-        return http.build();
-    }
-
-    @Bean
-    public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder();
+    public List<MyReviewResponse> toMyReviewResponses(List<Review> reviews) {
+        return reviews.stream()
+                .map(this::toMyReviewResponse)
+                .toList();
     }
 }
 
@@ -205,70 +158,57 @@ public class SecurityConfig {
 
 ```java
 @Component
-public class JwtUtil {
+public class MissionConverter {
 
-    @Value("${jwt.secret}")
-    private String secretKey;
-
-    private final long EXPIRATION = 1000 * 60 * 60;
-
-    public String generateToken(String username) {
-        Date now = new Date();
-        Date exp = new Date(now.getTime() + EXPIRATION);
-
-        return Jwts.builder()
-                .setSubject(username)
-                .setIssuedAt(now)
-                .setExpiration(exp)
-                .signWith(Keys.hmacShaKeyFor(secretKey.getBytes()), SignatureAlgorithm.HS256)
-                .compact();
+    public MissionResponse toMissionResponse(Mission mission) {
+        return MissionResponse.builder()
+                .missionId(mission.getId())
+                .storeId(mission.getStore().getId())
+                .storeName(mission.getStore().getName())
+                .title(mission.getTitle())
+                .description(mission.getDescription())
+                .rewardPoint(mission.getRewardPoint())
+                .status(mission.getStatus())
+                .build();
     }
 
-    public String getUsername(String token) {
-        return Jwts.parserBuilder()
-                .setSigningKey(Keys.hmacShaKeyFor(secretKey.getBytes()))
-                .build()
-                .parseClaimsJws(token)
-                .getBody()
-                .getSubject();
+    public List<MissionResponse> toMissionResponses(List<Mission> missions) {
+        return missions.stream()
+                .map(this::toMissionResponse)
+                .toList();
     }
 }
 
 ```
 
+1.
+
 ```java
-@Component
+public interface ReviewRepository extends JpaRepository<Review, Long> {
+    Page<Review> findByWriterId(Long memberId, Pageable pageable);
+}
+```
+
+```java
+@Service
 @RequiredArgsConstructor
-public class JwtFilter extends OncePerRequestFilter {
+public class ReviewQueryService {
 
-    private final JwtUtil jwtUtil;
-    private final CustomUserDetailsService customUserDetailsService;
+    private final ReviewRepository reviewRepository;
+    private final ReviewConverter reviewConverter;
 
-    @Override
-    protected void doFilterInternal(HttpServletRequest request,
-                                    HttpServletResponse response,
-                                    FilterChain filterChain)
-            throws ServletException, IOException {
+    private static final Long LOGIN_MEMBER_ID = 1L;
 
-        String authHeader = request.getHeader("Authorization");
-
-        if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7);
-
-            try {
-                String username = jwtUtil.getUsername(token);
-                UserDetails userDetails = customUserDetailsService.loadUserByUsername(username);
-
-                UsernamePasswordAuthenticationToken authentication =
-                        new UsernamePasswordAuthenticationToken(
-                                userDetails, null, userDetails.getAuthorities()
-                        );
-                SecurityContextHolder.getContext().setAuthentication(authentication);
-            } catch (Exception e) {
-            }
-        }
-
-        filterChain.doFilter(request, response);
+    public PageResponse<MyReviewResponse> getMyReviews(Pageable pageable) {
+        Page<Review> page = reviewRepository.findByWriterId(LOGIN_MEMBER_ID, pageable);
+        List<MyReviewResponse> content = reviewConverter.toMyReviewResponses(page.getContent());
+        return PageResponse.<MyReviewResponse>builder()
+                .content(content)
+                .page(page.getNumber() + 1)
+                .size(page.getSize())
+                .totalElements(page.getTotalElements())
+                .totalPages(page.getTotalPages())
+                .build();
     }
 }
 
@@ -276,39 +216,134 @@ public class JwtFilter extends OncePerRequestFilter {
 
 ```java
 @RestController
-@RequestMapping("/api/auth")
 @RequiredArgsConstructor
-public class AuthApiController {
+@RequestMapping("/api/reviews")
+@Tag(name = "Review", description = "리뷰 관련 API")
+public class ReviewController {
 
-    private final MemberService memberService;
-    private final AuthenticationManagerBuilder authManagerBuilder;
-    private final JwtUtil jwtUtil;
-
-    @PostMapping("/signup")
-    public ResponseEntity<?> signup(@RequestBody LoginRequest req) {
-        Member m = memberService.signup(req.username(), req.password());
-        return ResponseEntity.ok(new SignupResponse(m.getId(), m.getUsername()));
-    }
-
-    @PostMapping("/login")
-    public ResponseEntity<?> login(@RequestBody LoginRequest req) {
-        UsernamePasswordAuthenticationToken authToken =
-                new UsernamePasswordAuthenticationToken(req.username(), req.password());
-
-        Authentication auth = authManagerBuilder.getObject().authenticate(authToken);
-
-        String token = jwtUtil.generateToken(req.username());
-        return ResponseEntity.ok(new LoginResponse(token));
-    }
+    private final ReviewQueryService reviewQueryService;
 
     @GetMapping("/me")
-    public ResponseEntity<?> me(Authentication auth) {
-        return ResponseEntity.ok("현재 로그인: " + auth.getName());
-    }
+    @Operation(summary = "내가 작성한 리뷰 목록 조회",
+               description = "로그인한 사용자가 작성한 리뷰를 10개씩 페이징 조회합니다.")
+    public PageResponse<MyReviewResponse> getMyReviews(
+            @Parameter(description = "1 이상의 페이지 번호", example = "1")
+            @PageParam Pageable pageable) {
 
-    public record LoginRequest(String username, String password) {}
-    public record SignupResponse(Long id, String username) {}
-    public record LoginResponse(String token) {}
+        return reviewQueryService.getMyReviews(pageable);
+    }
+```
+
+2.
+
+```java
+public interface MissionRepository extends JpaRepository<Mission, Long> {
+
+    Page<Mission> findByStoreId(Long storeId, Pageable pageable);
+}
+
+```
+
+```java
+@Service
+@RequiredArgsConstructor
+public class MissionQueryService {
+
+    private final MissionRepository missionRepository;
+    private final MissionConverter missionConverter;
+
+    public PageResponse<MissionResponse> getStoreMissions(Long storeId, Pageable pageable) {
+        Page<Mission> page = missionRepository.findByStoreId(storeId, pageable);
+        List<MissionResponse> content = missionConverter.toMissionResponses(page.getContent());
+        return PageResponse.<MissionResponse>builder()
+                .content(content)
+                .page(page.getNumber() + 1)
+                .size(page.getSize())
+                .totalElements(page.getTotalElements())
+                .totalPages(page.getTotalPages())
+                .build();
+    }
+}
+
+```
+
+```java
+@RestController
+@RequiredArgsConstructor
+@RequestMapping("/api/stores")
+@Tag(name = "StoreMission", description = "가게 미션 API")
+public class StoreMissionController {
+
+    private final MissionQueryService missionQueryService;
+
+    @GetMapping("/{storeId}/missions")
+    @Operation(summary = "가게의 미션 목록 조회",
+               description = "특정 가게에 등록된 미션을 10개씩 페이징 조회합니다.")
+    public PageResponse<MissionResponse> getStoreMissions(
+            @Parameter(description = "가게 ID", example = "1")
+            @PathVariable Long storeId,
+            @Parameter(description = "1 이상의 페이지 번호", example = "1")
+            @PageParam Pageable pageable) {
+
+        return missionQueryService.getStoreMissions(storeId, pageable);
+    }
+}
+
+```
+
+3.
+
+```java
+public interface MissionRepository extends JpaRepository<Mission, Long> {
+
+    Page<Mission> findByMemberIdAndStatus(Long memberId, MissionStatus status, Pageable pageable);
+}
+```
+
+```java
+@Service
+@RequiredArgsConstructor
+public class MyMissionService {
+
+    private final MissionRepository missionRepository;
+    private final MissionConverter missionConverter;
+
+    private static final Long LOGIN_MEMBER_ID = 1L;
+
+    public PageResponse<MissionResponse> getMyRunningMissions(Pageable pageable) {
+        Page<Mission> page = missionRepository.findByMemberIdAndStatus(
+                LOGIN_MEMBER_ID, MissionStatus.IN_PROGRESS, pageable);
+
+        List<MissionResponse> content = missionConverter.toMissionResponses(page.getContent());
+        return PageResponse.<MissionResponse>builder()
+                .content(content)
+                .page(page.getNumber() + 1)
+                .size(page.getSize())
+                .totalElements(page.getTotalElements())
+                .totalPages(page.getTotalPages())
+                .build();
+    }
+}
+```
+
+```java
+@RestController
+@RequiredArgsConstructor
+@RequestMapping("/api/missions")
+@Tag(name = "MyMission", description = "내 미션 API")
+public class MyMissionController {
+
+    private final MyMissionService myMissionService;
+
+    @GetMapping("/me/running")
+    @Operation(summary = "진행중인 내 미션 목록 조회",
+               description = "로그인한 사용자의 진행중(IN_PROGRESS) 미션을 페이징 조회합니다.")
+    public PageResponse<MissionResponse> getMyRunningMissions(
+            @Parameter(description = "1 이상의 페이지 번호", example = "1")
+            @PageParam Pageable pageable) {
+
+        return myMissionService.getMyRunningMissions(pageable);
+    }
 }
 
 ```
